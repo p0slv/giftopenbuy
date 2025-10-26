@@ -440,7 +440,7 @@ async def maybe_print_or_buy(client: TelegramClient,
 
     try:
         # Stars flow (as before)
-        invoice = types.InputInvoiceStarGiftResale(slug=full_slug.lower(), to_id=to_peer, ton=True)
+        invoice = types.InputInvoiceStarGiftResale(slug=full_slug.lower(), to_id=to_peer, ton=a.ton)
         pay_form = await client(functions.payments.GetPaymentFormRequest(invoice=invoice))
         result = await client(functions.payments.SendStarsFormRequest(form_id=pay_form.form_id, invoice=invoice))
         print(f"[BUY] Результат покупки: {type(result).__name__}")
