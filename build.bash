@@ -1,8 +1,8 @@
 # Обновление системы
-pkg update -y && pkg upgrade -y
+pkg update && pkg upgrade
 
 # Установка Python и Git
-pkg install -y python git
+pkg install python git
 
 # Установка pip и зависимостей
 pip install --upgrade pip
