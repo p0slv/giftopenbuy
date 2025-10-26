@@ -63,6 +63,7 @@ from telethon.sessions import StringSession
 from telethon.tl import types, functions
 
 SESSION_FILE = Path("ssession.txt")
+os.system("clear")
 CHANNEL = "https://t.me/giftmarketfeed"
 LINK_RE = re.compile(r"(?:https?://)?t\.me/nft/([A-Za-z0-9_-]+)", re.IGNORECASE)
 
