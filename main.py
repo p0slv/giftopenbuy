@@ -279,19 +279,18 @@ async def prompt_user_prefs() -> Tuple[FilterConfig, ActionConfig]:
     dest: Optional[str] = None
     buyer_recipient: Optional[str] = None
     ton: Optional[bool] = True
-    if mode == "print":
-        dest_in = input("\n🕵️‍♀️ Где отписывать? \n(оставьте пустым чтобы писать в консоль, или впишите @username / chat_id): ").strip()
-        dest = dest_in or None
-    else:
-        buyer_recipient = input("\n🎁 Покупать подарок комуто? \nЕсли да, введите @username или user_id: ").strip()
-        if not buyer_recipient:
-            print("⚠️ Вы не выбрали получателя подарка! По умолчанию подарок будет отправляться вам-же.")
-            tont = ''
-            while tont not in ("да", "нет"):
-                tont = input(
-                    "\n💎️ Покупать за TON? (да/нет): ").strip()
-            ton = True if tont == "да" else False
-            buyer_recipient = 'no'
+    dest_in = input("\n🕵️‍♀️ Где отписывать? \n(оставьте пустым чтобы писать в консоль, или впишите @username / chat_id): ").strip()
+    dest = dest_in or None
+
+    buyer_recipient = input("\n🎁 Покупать подарок комуто? \nЕсли да, введите @username или user_id: ").strip()
+    if not buyer_recipient:
+        print("⚠️ Вы не выбрали получателя подарка! По умолчанию подарок будет отправляться вам-же.")
+        tont = ''
+        while tont not in ("да", "нет"):
+            tont = input(
+                "\n💎️ Покупать за TON? (да/нет): ").strip()
+        ton = True if tont == "да" else False
+        buyer_recipient = 'no'
 
     print('\n')
     return (
@@ -409,13 +408,14 @@ async def maybe_print_or_buy(client: TelegramClient,
     print(line)
 
     # PRINT mode
+    if a.dest:
+        try:
+            peer = await resolve_peer(client, a.dest)
+            await client.send_message(peer, f"{line}\n{link}")
+        except Exception as e:
+            print(f"[!] Не могу отправить сообщение {a.dest}: {e}")
+
     if a.mode == "print":
-        if a.dest:
-            try:
-                peer = await resolve_peer(client, a.dest)
-                await client.send_message(peer, f"{line}\n{link}")
-            except Exception as e:
-                print(f"[!] Не могу отправить сообщение {a.dest}: {e}")
         return
 
     # BUY mode
