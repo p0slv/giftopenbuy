@@ -22,6 +22,8 @@ import subprocess
 import os
 import sys
 
+buy_one = False
+
 def ensure_telethon_resale_invoice():
     """
     Ensure telethon.tl.types.InputInvoiceStarGiftResale is available.
@@ -232,6 +234,43 @@ def message_meta_allows_status(status: str, policy: str) -> bool:
         return status == "no"
     return True
 
+def stars_amount_to_int(obj) -> Optional[int]:
+    if obj is None: return None
+    try:
+        amt = getattr(obj, "amount", None)
+        return int(amt) if amt is not None else None
+    except Exception:
+        return None
+
+def ton_amount_to_float(obj) -> Optional[float]:
+    if obj is None: return None
+    try:
+        amt = getattr(obj, "amount", None)
+        if amt is None: return None
+        return float(amt) / 1_000_000_000.0  # nanoTON -> TON
+    except Exception:
+        return None
+
+def extract_prices(it) -> Tuple[Optional[int], Optional[float]]:
+    stars_price = None
+    ton_price = None
+    ra = getattr(it, "resell_amount", None)
+    if isinstance(ra, list) and ra:
+        for x in ra:
+            cname = x.__class__.__name__.lower()
+            if "starsamount" in cname:
+                stars_price = stars_amount_to_int(x)
+            elif "starstonamount" in cname or "tonamount" in cname or "ton" in cname:
+                ton_price = ton_amount_to_float(x)
+        if stars_price is None and len(ra) >= 1:
+            stars_price = stars_amount_to_int(ra[0])
+        if ton_price is None and len(ra) >= 2:
+            ton_price = ton_amount_to_float(ra[1])
+    if stars_price is None:
+        stars_price = (stars_amount_to_int(getattr(it, "stars_amount", None))
+                       or stars_amount_to_int(getattr(it, "price_stars", None)))
+    return stars_price, ton_price
+
 # ----------------------- prompts & config -----------------------
 
 @dataclass
@@ -247,6 +286,7 @@ class ActionConfig:
     dest: Optional[str]     # for print: where to send (None => console)
     buyer_recipient: Optional[str]  # for buy: @username/id to receive the gift
     ton: Optional[bool]
+    max_ton: Optional[float]
 
 @dataclass
 class FilterConfig:
@@ -281,6 +321,7 @@ async def prompt_user_prefs() -> Tuple[FilterConfig, ActionConfig]:
     ton: Optional[bool] = True
     dest_in = input("\n🕵️‍♀️ Где отписывать? \n(оставьте пустым чтобы писать в консоль, или впишите @username / chat_id): ").strip()
     dest = dest_in or None
+    max_ton = 100000
 
     buyer_recipient = input("\n🎁 Покупать подарок комуто? \nЕсли да, введите @username или user_id: ").strip()
     if not buyer_recipient:
@@ -290,12 +331,18 @@ async def prompt_user_prefs() -> Tuple[FilterConfig, ActionConfig]:
             tont = input(
                 "\n💎️ Покупать за TON? (да/нет): ").strip()
         ton = True if tont == "да" else False
+        max_ton = 'p'
+        while not max_ton.isdecimal() and max_ton != '':
+            max_ton = input("\n🛡️ Максимальная цена в TON? (оставьте пустым чтобы убрать лимит): ").strip()
+        if max_ton == '':
+            max_ton = 100000
+        max_ton = float(max_ton)
         buyer_recipient = 'no'
 
     print('\n')
     return (
         FilterConfig(collections, models, backdrops, symbols, msg_meta_policy),
-        ActionConfig(mode, dest, buyer_recipient, ton)
+        ActionConfig(mode, dest, buyer_recipient, ton, max_ton)
     )
 
 async def resolve_peer(client: TelegramClient, s: str):
@@ -376,6 +423,11 @@ async def maybe_print_or_buy(client: TelegramClient,
 
     # Titles
     model, backdrop, symbol = extract_titles_from_attributes(unique)
+    stars_price, ton_price = extract_prices(unique)
+    print(stars_price, ton_price)
+
+    if ton_price and ton_price > a.max_ton:
+        return
 
     # Attribute-name filters
     def _contains_any(haystack: Optional[str], needles: List[str]) -> bool:
@@ -444,6 +496,8 @@ async def maybe_print_or_buy(client: TelegramClient,
         pay_form = await client(functions.payments.GetPaymentFormRequest(invoice=invoice))
         result = await client(functions.payments.SendStarsFormRequest(form_id=pay_form.form_id, invoice=invoice))
         print(f"[BUY] Результат покупки: {type(result).__name__}")
+        if buy_one:
+            exit('DONE!')
     except Exception as e:
         print(f"[!] Автопокупка провалена для {full_slug}: {e}")
 
