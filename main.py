@@ -21,8 +21,12 @@ Env (optional):
 import subprocess
 import os
 import sys
+import random
 
-buy_one = True
+import telethon.tl.functions.payments
+from telethon.tl.types import SavedStarGift
+
+buy_one = False
 done = False
 
 def ensure_telethon_resale_invoice():
@@ -287,11 +291,12 @@ class FilterConfig:
 @dataclass
 class ActionConfig:
     mode: str               # 'print' or 'buy'
-    dest: Optional[str]     # for print: where to send (None => console)
-    buyer_recipient: Optional[str]  # for buy: @username/id to receive the gift
+    dest: Optional[str]     # для print: куда слать (None => консоль)
+    buyer_recipient: Optional[str]  # получатель подарка при покупке
     ton: Optional[bool]
     max_ton: Optional[float]
-    min_profit_ton: Optional[float]  # NEW: minimum profit in TON (None = no filter)
+    min_profit_ton: Optional[float]           # минимальная прибыль в TON
+    min_profit_coef: Optional[float] = None   # НОВОЕ: минимальный коэффициент (прибыль/цена)
 
 @dataclass
 class FilterConfig:
@@ -338,17 +343,17 @@ async def prompt_user_prefs() -> Tuple[FilterConfig, ActionConfig]:
     buyer_recipient = input("\n🎁 Покупать подарок кому-то? \nЕсли да, введите @username или user_id: ").strip()
     if not buyer_recipient:
         print("⚠️ Вы не выбрали получателя подарка! По умолчанию подарок будет отправляться вам-же.")
-        tont = ''
-        while tont not in ("да", "нет"):
-            tont = input("\n💎️ Покупать за TON? (да/нет): ").strip()
-        ton = True if tont == "да" else False
-        max_ton = 'p'
-        while not is_float(max_ton) and max_ton != '':
-            max_ton = input("\n🛡️ Максимальная цена в TON? (оставьте пустым чтобы убрать лимит): ").strip()
-        if max_ton == '':
-            max_ton = 100000
-        max_ton = float(max_ton)
         buyer_recipient = 'no'
+    tont = ''
+    while tont not in ("да", "нет"):
+        tont = input("\n💎️ Покупать за TON? (да/нет): ").strip()
+    ton = True if tont == "да" else False
+    max_ton = 'p'
+    while not is_float(max_ton) and max_ton != '':
+        max_ton = input("\n🛡️ Максимальная цена в TON? (оставьте пустым чтобы убрать лимит): ").strip()
+    if max_ton == '':
+        max_ton = 100000
+    max_ton = float(max_ton)
 
     # NEW: ask for min profit (TON)
     min_profit_ton: Optional[float] = None
@@ -360,10 +365,22 @@ async def prompt_user_prefs() -> Tuple[FilterConfig, ActionConfig]:
             print("⚠️ Некорректное значение, фильтр по окупаемости выключен.")
             min_profit_ton = None
 
+    # NEW: если минимальная прибыльность (в TON) НЕ указана — спросить минимальный коэффициент прибыльности
+    min_profit_coef: Optional[float] = None
+    if min_profit_ton is None:
+        _mc = input("\n🔢 Минимальный коэффициент прибыльности (прибыль/цена в TON)? "
+                    "Например 0.10; пусто = без фильтра: ").strip().replace(',', '.')
+        if _mc:
+            try:
+                min_profit_coef = float(_mc)
+            except ValueError:
+                print("⚠️ Некорректное значение, фильтр по коэффициенту выключен.")
+                min_profit_coef = None
+
     print('\n')
     return (
         FilterConfig(collections, models, backdrops, symbols, msg_meta_policy),
-        ActionConfig(mode, dest, buyer_recipient, ton, max_ton, min_profit_ton)
+        ActionConfig(mode, dest, buyer_recipient, ton, max_ton, min_profit_ton, min_profit_coef)
     )
 
 async def resolve_peer(client: TelegramClient, s: str):
@@ -379,6 +396,114 @@ async def resolve_peer(client: TelegramClient, s: str):
         return await client.get_input_entity(s)
     except Exception as e:
         raise RuntimeError(f"Could not resolve peer '{s}': {e}")
+
+PIN_LIMIT = 6  # Telegram allows up to 6 pinned gifts
+
+def _has_type(name: str) -> bool:
+    from telethon.tl import types
+    return hasattr(types, name)
+
+async def _unsave_by_slug_or_msgid(client, slug: str | None, msg_id: int | None) -> bool:
+    from telethon.tl import types, functions
+    # Prefer slug-based unsave if supported
+    if slug and _has_type("InputSavedStarGiftSlug"):
+        try:
+            await client(functions.payments.SaveStarGiftRequest(
+                stargift=types.InputSavedStarGiftSlug(slug=slug),
+                unsave=True
+            ))
+            return True
+        except Exception:
+            pass
+    # Fallback: unsave by gift message id
+    if msg_id and _has_type("InputSavedStarGiftUser"):
+        try:
+            await client(functions.payments.SaveStarGiftRequest(
+                stargift=types.InputSavedStarGiftUser(msg_id=msg_id),
+                unsave=True
+            ))
+            return True
+        except Exception:
+            pass
+    return False
+
+async def _pin_by_slug(client, slug: str):
+    """
+    Pin a gift to profile by slug if possible; otherwise resolve the gift message
+    in 'Saved Messages' and pin by msg_id.
+    """
+    from telethon.tl import types, functions
+    # Try the easy way: pin by slug
+    if _has_type("InputSavedStarGiftSlug"):
+        await client(functions.payments.SaveStarGiftRequest(
+            stargift=types.InputSavedStarGiftSlug(slug=slug)
+        ))
+        return
+
+    # Fallback: scan recent messages to find the gift service message and pin by msg_id
+    me = "me"
+    msgs = await client.get_messages(me, limit=100)
+    found_id = None
+    lslug = slug.lower()
+    for m in msgs:
+        act = getattr(m, "action", None)
+        # Many Telethon builds expose a field named `slug` on the action for star gifts
+        if act is not None and getattr(act, "slug", None):
+            if str(getattr(act, "slug")).lower() == lslug:
+                found_id = m.id
+                break
+        # Some builds may store the slug in message text; try a lenient match
+        if not found_id and isinstance(m.message, str) and lslug in m.message.lower():
+            found_id = m.id
+            break
+
+    if not found_id or not _has_type("InputSavedStarGiftUser"):
+        raise RuntimeError("Could not resolve gift message for pinning; upgrade Telethon or increase search window.")
+
+    await client(functions.payments.SaveStarGiftRequest(
+        stargift=types.InputSavedStarGiftUser(msg_id=found_id)
+    ))
+
+async def pin_gift_with_replacement(client, slug: str):
+    """
+    Ensure the gift `slug` is pinned; if already at capacity (6), unpin a random pinned gift first.
+    """
+    from telethon.tl import functions
+
+    peer = types.InputPeerSelf()
+
+    # Get currently pinned (saved) gifts on your profile
+    res = await client(functions.payments.GetSavedStarGiftsRequest(
+        peer=peer,
+        exclude_unsaved=True,  # only profile-visible (pinned) gifts
+        offset='0',
+        limit=100
+    ))
+    giftl =  list(getattr(res, "gifts", []) or [])
+    notpinned = []
+    for i in giftl:
+        print(i)
+        if not i.pinned_to_top:
+            notpinned.append(i)
+    print([i for i in giftl])
+    print()
+    print(notpinned)
+
+    for gift in notpinned:
+        gift: SavedStarGift
+        gift.gift: StarGiftUnique
+        gift_id = gift.gift.id
+        slugg = gift.gift.slug
+        print(slugg, slug, slugg.lower() == slug.lower())
+        if slugg.lower() == slug.lower():
+            idx = next((k for k, obj in enumerate(giftl) if obj.gift.slug == slugg), None)
+            if idx is not None:
+                giftl.pop(idx)  # or: del items[idx]
+            await client(telethon.tl.functions.payments.ToggleStarGiftsPinnedToTopRequest(
+                peer=peer,
+                stargift=list([types.InputSavedStarGiftSlug(slug=slugg)] + [types.InputSavedStarGiftSlug(slug=ii.gift.slug) for ii in giftl[:5]])
+            ))
+
 
 # ----------------------- gift API -----------------------
 
@@ -479,11 +604,23 @@ async def maybe_print_or_buy(client: TelegramClient,
         # --- Profit filter (TON) ---
     if a.min_profit_ton is not None:
         if profit_ton is None:
-            # No profit parsed from the feed; safest is to skip.
-            # If you prefer to allow in this case, comment-out the next line.
+            # Нет значения прибыли — безопаснее пропустить
             return
         if profit_ton < a.min_profit_ton:
             return
+    else:
+        # 2) Если min_profit_ton НЕ задан, но задан min_profit_coef (прибыль/цена)
+        if a.min_profit_coef is not None:
+            # Нужна цена в TON, иначе невозможно посчитать коэффициент
+            if profit_ton is None:
+                return
+            # Цена в TON берётся из extract_prices(unique)
+            # (см. выше: stars_price, ton_price = extract_prices(unique))
+            if ton_price is None or ton_price <= 0:
+                return
+            coef = profit_ton / ton_price
+            if coef < a.min_profit_coef:
+                return
 
     # Print line (now includes 'probably')
     line = (f"Подарок найден! {full_slug} → \n"
@@ -530,6 +667,18 @@ async def maybe_print_or_buy(client: TelegramClient,
             pay_form = await client(functions.payments.GetPaymentFormRequest(invoice=invoice))
             result = await client(functions.payments.SendStarsFormRequest(form_id=pay_form.form_id, invoice=invoice))
             print(f"[BUY] Результат покупки: {type(result).__name__}")
+
+            # Pin only if the gift was bought for yourself
+            is_self = isinstance(to_peer, types.InputPeerSelf)
+            if is_self:
+                try:
+                    # Give Telegram a moment to deliver the gift message to your dialog
+                    await asyncio.sleep(1)
+                    await pin_gift_with_replacement(client, full_slug.lower())
+                    print(f"[PIN] Закрепил {full_slug} на профиле (при необходимости заменил случайный закреп).")
+                except Exception as e:
+                    print(f"[pin] Не удалось закрепить {full_slug}: {e}")
+
             if buy_one:
                 done = True
     except Exception as e:
@@ -557,6 +706,7 @@ async def main():
         new_s = client.session.save()
         if new_s and new_s != session_str:
             write_session_string(new_s)
+
 
         # Ask user preferences once at startup
         filters, action = await prompt_user_prefs()
