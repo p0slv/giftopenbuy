@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
+print('Starting...')
 """
 Telethon watcher for @giftmarketfeed that:
 - Prompts the user for filters (Collections, Models, Backdrops, Symbols).
@@ -68,6 +68,8 @@ from getpass import getpass
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from telethon.tl import types, functions
+
+import time
 
 SESSION_FILE = Path("ssession.txt")
 os.system("clear")
@@ -659,7 +661,7 @@ async def maybe_print_or_buy(client: TelegramClient,
     except Exception as e:
         print(f"[!] Не могу получить обьект получателя подарка '{a.buyer_recipient}': {e}")
         return
-
+    await asyncio.sleep(1)
     try:
         if not done:
             # Stars flow (as before)
